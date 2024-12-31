@@ -21,6 +21,10 @@ class Future:
         for callback in self._callbacks:
             callback(self)
 
+    def __iter__(self):
+        yield self
+        return self.result
+
 
 class Task:
     def __init__(self, coro) -> None:
@@ -61,7 +65,7 @@ class Fetcher:
                 sock, server_hostname=self.hostname, do_handshake_on_connect=False
             ) as self.ssl_sock:
                 self.selector.register(self.ssl_sock.fileno(), EVENT_WRITE, self.on_connected)
-                yield self.future
+                yield from self.future
                 self.selector.unregister(self.ssl_sock.fileno())
                 yield from self.do_handshake()
                 logging.debug("Send request")
@@ -85,7 +89,7 @@ class Fetcher:
         assert self.ssl_sock is not None, "Can't call the method without a socket"
         self.future = Future()
         self.selector.register(self.ssl_sock.fileno(), EVENT_READ, self.on_read)
-        chunk = yield self.future
+        chunk = yield from self.future
         assert not isinstance(chunk, bool), "The future has an unexpected result"
         self.selector.unregister(self.ssl_sock.fileno())
         return chunk
@@ -96,7 +100,7 @@ class Fetcher:
         while True:
             self.future = Future()
             self.selector.register(self.ssl_sock.fileno(), EVENT_WRITE, self.on_handshake)
-            is_done = yield self.future
+            is_done = yield from self.future
             assert isinstance(is_done, bool), "The future has an unexpected result"
             self.selector.unregister(self.ssl_sock.fileno())
             if is_done is not None and is_done:
