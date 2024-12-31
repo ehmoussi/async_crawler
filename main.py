@@ -63,38 +63,57 @@ class Fetcher:
                 self.selector.register(self.ssl_sock.fileno(), EVENT_WRITE, self.on_connected)
                 yield self.future
                 self.selector.unregister(self.ssl_sock.fileno())
-                logging.debug("Start Handshake")
-                while True:
-                    self.future = Future()
-                    self.selector.register(
-                        self.ssl_sock.fileno(), EVENT_WRITE, self.on_handshake
-                    )
-                    is_done = yield self.future
-                    assert isinstance(is_done, bool), "The future has an unexpected result"
-                    self.selector.unregister(self.ssl_sock.fileno())
-                    if is_done is not None and is_done:
-                        break
-                logging.debug("Handshake done")
+                yield from self.do_handshake()
                 logging.debug("Send request")
                 self.ssl_sock.send(self.request.encode("ascii"))
-                logging.debug("Start reading")
-                while True:
-                    self.future = Future()
-                    self.selector.register(self.ssl_sock.fileno(), EVENT_READ, self.on_read)
-                    chunk = yield self.future
-                    assert not isinstance(chunk, bool), "The future has an unexpected result"
-                    self.selector.unregister(self.ssl_sock.fileno())
-                    if chunk is None:
-                        continue
-                    elif len(chunk) > 0:
-                        self.response += chunk
-                    else:
-                        logging.debug("Finished reading")
-                        break
+                yield from self.read_all()
 
-    def on_connected(self):
-        logging.debug("Connected")
-        self.future.set_result(None)
+    def read_all(self) -> Generator[Future, bytes | None, None]:
+        assert self.ssl_sock is not None, "Can't call the method without a socket"
+        logging.debug("Start reading")
+        while True:
+            chunk = yield from self.read_chunck()
+            if chunk is None:
+                continue
+            elif len(chunk) > 0:
+                self.response += chunk
+            else:
+                break
+        logging.debug("Finished reading")
+
+    def read_chunck(self) -> Generator[Future, bytes | None, bytes | None]:
+        assert self.ssl_sock is not None, "Can't call the method without a socket"
+        self.future = Future()
+        self.selector.register(self.ssl_sock.fileno(), EVENT_READ, self.on_read)
+        chunk = yield self.future
+        assert not isinstance(chunk, bool), "The future has an unexpected result"
+        self.selector.unregister(self.ssl_sock.fileno())
+        return chunk
+
+    def do_handshake(self) -> Generator[Future, bool, None]:
+        assert self.ssl_sock is not None, "Can't call the method without a socket"
+        logging.debug("Start Handshake")
+        while True:
+            self.future = Future()
+            self.selector.register(self.ssl_sock.fileno(), EVENT_WRITE, self.on_handshake)
+            is_done = yield self.future
+            assert isinstance(is_done, bool), "The future has an unexpected result"
+            self.selector.unregister(self.ssl_sock.fileno())
+            if is_done is not None and is_done:
+                break
+        logging.debug("Handshake done")
+
+    # ------------------ Callbacks ---------------------------------------
+
+    def on_read(self):
+        try:
+            chunk = self.ssl_sock.recv(4096)
+        except ssl.SSLWantReadError:
+            self.future.set_result(None)
+            logging.debug("Receiving chunk in progress ...")
+        else:
+            logging.debug("Read a chunk of 4096 bytes")
+            self.future.set_result(chunk)
 
     def on_handshake(self):
         try:
@@ -105,15 +124,11 @@ class Fetcher:
         else:
             self.future.set_result(True)
 
-    def on_read(self):
-        logging.debug("Read a chunk of 4096 bytes")
-        try:
-            chunk = self.ssl_sock.recv(4096)
-        except ssl.SSLWantReadError:
-            self.future.set_result(None)
-            logging.debug("Receiving chunk in progress ...")
-        else:
-            self.future.set_result(chunk)
+    def on_connected(self):
+        logging.debug("Connected")
+        self.future.set_result(None)
+
+    # ------------------ Deprecated ---------------------------------------
 
     def read(self, key: selectors.SelectorKey, mask: int) -> None:
         assert self.ssl_sock is not None, "Can't call the method without a socket"
@@ -122,12 +137,12 @@ class Fetcher:
             chunk = self.ssl_sock.recv(4096)
         except (ssl.SSLWantReadError, OSError):
             logging.debug("Chunk not complete")
-            self.selector.register(key.fd, EVENT_READ, self.read)
+            self.selector.register(key.fd, EVENT_READ, self._read)
         else:
             if len(chunk) > 0:
                 logging.debug("Read a chunk of 4096 bytes")
                 self.response += chunk
-                self.selector.register(key.fd, EVENT_READ, self.read)
+                self.selector.register(key.fd, EVENT_READ, self._read)
             else:
                 logging.debug("Finished reading")
 
@@ -139,7 +154,7 @@ class Fetcher:
         request_encoded = self.request.encode("ascii")
         self.ssl_sock.send(request_encoded)
         logging.debug("Start reading")
-        self.selector.register(key.fd, EVENT_WRITE, self.read)
+        self.selector.register(key.fd, EVENT_WRITE, self._read)
 
     def start_handshake(self, key: selectors.SelectorKey, mask: int) -> None:
         logging.debug("Start Handshake")
